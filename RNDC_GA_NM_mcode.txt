@@ -1,0 +1,150 @@
+================================================================================
+QUERY DOCUMENTATION
+================================================================================
+Query Name:         RNDC GA and NM
+Root File:          Atlas VMI_Open Upload File
+================================================================================
+
+-- SOURCE:
+--     L:\VMI Operations\Sazerac VMI MTD Inventory and Sales Reports (ALL).xlsx
+--     File Type: Excel Workbook
+--     Sheet: "Sazerac VMI MTD Inventory and S"
+--     Note: Sheet name is truncated — full name appears to be
+--           "Sazerac VMI MTD Inventory and Sales Reports (ALL)"
+--           File lives in the root VMI Operations folder, not in a
+--           customer-specific subfolder — suggesting it is a shared
+--           consolidated report rather than a customer-submitted file.
+
+-- KEY COLUMNS USED:
+--     Column1 (Sazerac VMI MTD...) → location code — used for BuyList mapping
+--     Column4                      → renamed to "Customer Item Reference"
+--     Column11                     → renamed to "On Hand Loaded"
+
+-- DROPPED COLUMNS:
+--     Column2, Column3, Column5, Column6, Column7, Column8,
+--     Column9, Column10, Column12, Column13, Column14, Column15
+
+-- KEY TRANSFORMATIONS:
+--     1.  Load Excel workbook, target truncated sheet name
+--     2.  Promote first row as headers — Column1 takes the file title
+--         as its header name (see flags)
+--     3.  Cast all columns — many as "any" type
+--     4.  Remove 12 of 15 columns — retain Column1, Column4, Column11
+--     5.  Map Column1 location code to BuyList code:
+--             ABQ → 1056497 001  (Albuquerque, NM)
+--             ATL → 1056527 001  (Atlanta, GA)
+--             SAV → 1056529 001  (Savannah, GA)
+--             null → all other values
+--     6.  Remove Column1 after mapping
+--     7.  Rename Column4 → "Customer Item Reference"
+--         Rename Column11 → "On Hand Loaded"
+--         Rename Custom → "Dpl Customer (key)"
+--     8.  Reorder: Customer Item Reference, Dpl Customer (key), On Hand Loaded
+--     9.  Skip first 3 rows of output (see flags)
+
+-- OUTPUT COLUMNS:
+--     Customer Item Reference   → distributor-facing SKU (to be joined via SKU crosswalk)
+--     Dpl Customer (key)        → BuyList code identifying the customer/location
+--     On Hand Loaded            → on-hand inventory quantity
+
+-- JOINS TO:
+--     Feeds into Append1 — BUT THIS QUERY IS CURRENTLY COMMENTED OUT
+--     RNDC GA and NM data is NOT currently included in the Atlas upload
+
+-- MAPS TO ATLAS COLUMN:
+--     Customer Item Reference   → Product (after SKU crosswalk)
+--     Dpl Customer (key)        → CompanyCode-Ship
+--     On Hand Loaded            → On Hand
+
+-- REDUNDANT: No — unique RNDC distributor source covering GA and NM
+
+================================================================================
+FLAGS / NOTES — MUST ADDRESS BEFORE PYTHON BUILD
+================================================================================
+
+-- FLAG 1 — THIS QUERY IS COMMENTED OUT OF APPEND1:
+--     RNDC GA and NM does not currently feed into the Atlas upload.
+--     It appears twice as a comment in the Append1 Table.Combine list
+--     but is not active. RNDC GA and NM inventory is missing from the
+--     Atlas upload entirely.
+--     ACTION REQUIRED: confirm with analyst whether RNDC was intentionally
+--     removed or whether it broke at some point and was disabled rather
+--     than fixed. If intentional, document the business reason.
+--     If unintentional, this is an active data gap that needs to be resolved.
+
+-- FLAG 2 — COLUMN NAMES ARE POSITIONAL NOT SEMANTIC:
+--     Column4 and Column11 are referenced by position rather than name.
+--     This is extremely fragile — if the source file adds, removes or
+--     reorders any columns, this query silently picks up wrong data
+--     with no error or warning.
+--     ACTION REQUIRED: open the source file and identify what Column4
+--     and Column11 actually contain before building the Python function.
+--     PYTHON BUILD NOTE: never reference columns by position. After
+--     loading, identify the correct columns by their header names and
+--     reference by name from that point forward.
+
+-- FLAG 3 — FILE TITLE USED AS COLUMN1 HEADER:
+--     The first column header is the full file title
+--     "Sazerac VMI MTD Inventory and Sales Reports (ALL)" —
+--     meaning row 1 of the sheet contains the report title in Column1,
+--     not a column header. The actual column headers are somewhere
+--     further down the sheet, which is why 3 rows are skipped at the end.
+--     This is the same metadata-rows-before-headers pattern seen in
+--     LDF, GG/Giglio — but handled differently here (skip at end
+--     rather than multiple PromoteHeaders).
+--     PYTHON BUILD NOTE: use skiprows in pd.read_excel() to skip
+--     directly to the real header row. Validate column names after load.
+
+-- FLAG 4 — TABLE.SKIP(3) AT END OF QUERY:
+--     3 rows are skipped after all transformations are complete,
+--     same concern as Faust TX and GG TX. By this point headers are
+--     already promoted and named columns exist, so these are data rows
+--     being dropped.
+--     ACTION REQUIRED: open the source file and identify what these
+--     3 rows contain. They are likely metadata rows that survive the
+--     transformation steps due to the column-positional approach.
+--     PYTHON BUILD NOTE: do not replicate blindly — filter by content
+--     rather than skipping by position.
+
+-- FLAG 5 — ONLY 3 LOCATIONS MAPPED OUT OF UNKNOWN TOTAL:
+--     Only ABQ (NM), ATL (GA) and SAV (GA) are mapped. The file
+--     title says "(ALL)" suggesting it contains data for all RNDC
+--     locations nationally, not just GA and NM. All other location
+--     codes produce null BuyList code and are silently dropped.
+--     ACTION REQUIRED: confirm what other RNDC locations exist in
+--     this file. If additional GA or NM locations are present, they
+--     may be VMI customers not currently mapped.
+--     PYTHON BUILD NOTE: log all distinct unmapped location codes on
+--     each run for visibility.
+
+-- FLAG 6 — SHARED CONSOLIDATED FILE:
+--     The file lives in the root VMI Operations folder and appears to
+--     be a consolidated report covering all RNDC locations nationally.
+--     This raises the question of who maintains this file, how often
+--     it is updated and whether it is the correct source for daily
+--     inventory data.
+--     ACTION REQUIRED: confirm refresh frequency and ownership of this
+--     file. A file named "MTD" (month-to-date) may not reflect current
+--     daily on-hand figures accurately.
+
+================================================================================
+RAW M CODE
+================================================================================
+
+let
+    Source = Excel.Workbook(File.Contents("L:\VMI Operations\Sazerac VMI MTD Inventory and Sales Reports (ALL).xlsx"), null, true),
+    #"Sazerac VMI MTD Inventory and S_Sheet" = Source{[Item="Sazerac VMI MTD Inventory and S",Kind="Sheet"]}[Data],
+    #"Promoted Headers" = Table.PromoteHeaders(#"Sazerac VMI MTD Inventory and S_Sheet", [PromoteAllScalars=true]),
+    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Sazerac VMI MTD Inventory and Sales Reports (ALL)", type text}, {"Column2", type text}, {"Column3", type any}, {"Column4", type any}, {"Column5", type text}, {"Column6", type text}, {"Column7", type any}, {"Column8", type any}, {"Column9", type any}, {"Column10", type any}, {"Column11", type any}, {"Column12", type any}, {"Column13", type any}, {"Column14", type any}, {"Column15", type any}}),
+    #"Removed Columns" = Table.RemoveColumns(#"Changed Type",{"Column2", "Column3", "Column5", "Column6", "Column7", "Column8", "Column9", "Column10", "Column12", "Column13", "Column14", "Column15"}),
+    #"Added Conditional Column" = Table.AddColumn(#"Removed Columns", "Custom", each if [#"Sazerac VMI MTD Inventory and Sales Reports (ALL)"] = "ABQ" then "1056497 001" else if [#"Sazerac VMI MTD Inventory and Sales Reports (ALL)"] = "ATL" then "1056527 001" else if [#"Sazerac VMI MTD Inventory and Sales Reports (ALL)"] = "SAV" then "1056529 001" else null),
+    #"Removed Columns1" = Table.RemoveColumns(#"Added Conditional Column",{"Sazerac VMI MTD Inventory and Sales Reports (ALL)"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Columns1",{{"Column4", "Customer Item Reference"}, {"Column11", "On Hand Loaded"}, {"Custom", "Dpl Customer (key)"}}),
+    #"Reordered Columns" = Table.ReorderColumns(#"Renamed Columns",{"Customer Item Reference", "Dpl Customer (key)", "On Hand Loaded"}),
+    #"Removed Top Rows" = Table.Skip(#"Reordered Columns",3)
+in
+    #"Removed Top Rows"
+
+================================================================================
+END OF FILE
+================================================================================

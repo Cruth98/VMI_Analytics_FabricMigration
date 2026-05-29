@@ -1,0 +1,166 @@
+================================================================================
+QUERY DOCUMENTATION
+================================================================================
+Query Name:         VMIBL
+Root File:          Atlas VMI_Open Upload File
+Source Type:        SQL (Fabric Data Warehouse)
+================================================================================
+
+-- SOURCE:
+--     Server: y2tjz7qjmziezabg56725hmy54-sll2odfgmm6ene2p55ripmzeaq
+--             .datawarehouse.fabric.microsoft.com
+--     Database: ERP
+--     Base Object: dbo.vw_BuyList_DetailInfo
+
+-- SQL QUERY (embedded):
+--     WITH RankedData AS (
+--         SELECT
+--             Company,
+--             BuyListCode,
+--             ItemCode,
+--             StateReferenceNumber,
+--             BuylistItemStatus,
+--             CustomerCrossReference,
+--             Customer,
+--             CustomerDeliveryAddressCode,
+--             CustomerFullName,
+--             BuyListDetailKey,
+--             ROW_NUMBER() OVER (
+--                 PARTITION BY
+--                     CustomerCrossReference,
+--                     Customer,
+--                     CustomerDeliveryAddressCode
+--                 ORDER BY BuylistItemStatus ASC
+--             ) AS rn
+--         FROM dbo.vw_BuyList_DetailInfo
+--         WHERE Company = 'SA'
+--     )
+--     SELECT *
+--     FROM RankedData
+--     WHERE rn = 1
+--     ORDER BY BuylistItemStatus ASC
+
+-- KEY COLUMNS RETURNED FROM SQL:
+--     Company                      → always 'SA' (filtered)
+--     BuyListCode                  → BuyList identifier
+--     ItemCode                     → Sazerac canonical product code (→ CATN32)
+--     StateReferenceNumber         → distributor-facing SKU / customer reference
+--     BuylistItemStatus            → status code, used for ranking/deduplication
+--     CustomerCrossReference       → customer-facing product reference (→ CSRF32)
+--     Customer                     → customer number
+--     CustomerDeliveryAddressCode  → delivery address / location code
+--     CustomerFullName             → full customer name
+--     BuyListDetailKey             → BuyList detail record key
+
+-- KEY TRANSFORMATIONS:
+--     1. SQL CTE with ROW_NUMBER() window function:
+--            Partitions by CustomerCrossReference + Customer +
+--            CustomerDeliveryAddressCode, ordered by BuylistItemStatus ASC
+--            Keeps only rn = 1 (first/best status record per unique
+--            customer-crossref-address combination)
+--     2. Build Customer # = Customer + ' ' + CustomerDeliveryAddressCode
+--            (produces BuyList code format, e.g. "1401158 001")
+--     3. Build Key3 = Customer # + StateReferenceNumber
+--            (composite join key: BuyList code + distributor SKU)
+--     4. Deduplicate on Key3
+--     5. Rename:
+--            ItemCode              → CATN32 (Sazerac canonical product code)
+--            Customer #            → BLCD32 (BuyList customer code)
+--            CustomerCrossReference → CSRF32 (customer reference)
+
+-- OUTPUT COLUMNS:
+--     CATN32        → Sazerac canonical product code (Atlas Product field)
+--     BLCD32        → BuyList customer code (Customer + DeliveryAddressCode)
+--     CSRF32        → Customer cross-reference / distributor-facing product code
+--     Key3          → BLCD32 + StateReferenceNumber (join key for Append1)
+--     StateReferenceNumber → distributor SKU used as join input
+--     BuyListCode, BuylistItemStatus, CustomerFullName, BuyListDetailKey,
+--     Company, Customer, CustomerDeliveryAddressCode (retained from SQL)
+
+-- JOINS TO:
+--     Append1 → LEFT JOIN on Key2 (Append1) = Key3 (VMIBL)
+--               Returns: CATN32 (the Sazerac canonical product code)
+--     This is the core SKU crosswalk for the entire Atlas upload pipeline.
+
+-- MAPS TO ATLAS COLUMN:
+--     CATN32 → Product (after join in Append1)
+
+================================================================================
+FLAGS / NOTES — MUST ADDRESS BEFORE PYTHON BUILD
+================================================================================
+
+-- FLAG 1 — THIS IS THE ENTIRE SKU CROSSWALK:
+--     VMIBL is the most critical query in the pipeline. Every distributor
+--     SKU must have a matching Key3 in this table to produce a valid CATN32.
+--     Any unmatched SKU results in null CATN32 and is dropped from the
+--     Atlas upload. This is almost certainly the primary driver of the
+--     ~40k rows dropped daily.
+--     PYTHON BUILD NOTE: after the VMIBL join in the pipeline, log all
+--     rows where CATN32 is null before dropping. Include Customer Item
+--     Reference and Dpl Customer (key) in the log so gaps can be
+--     identified and escalated to get new SKUs added to the BuyList.
+
+-- FLAG 2 — KEY3 JOIN FORMAT MUST EXACTLY MATCH KEY2 IN APPEND1:
+--     Key3 = Customer + ' ' + CustomerDeliveryAddressCode + StateReferenceNumber
+--     Key2 = Dpl Customer (key) + Customer Item Reference
+--     For the join to work, Dpl Customer (key) must equal
+--     Customer + ' ' + CustomerDeliveryAddressCode and
+--     Customer Item Reference must equal StateReferenceNumber.
+--     Any whitespace, leading zero or formatting difference between
+--     the distributor file SKU and the BuyList StateReferenceNumber
+--     will cause a silent join miss — CATN32 will be null.
+--     PYTHON BUILD NOTE: add a validation step that checks match rate
+--     after the VMIBL join. If match rate drops below a threshold
+--     (e.g. 80%), alert before proceeding to output.
+
+-- FLAG 3 — ROW_NUMBER() DEDUPLICATION STRATEGY:
+--     The CTE uses ROW_NUMBER() partitioned by CustomerCrossReference +
+--     Customer + CustomerDeliveryAddressCode, ordered by BuylistItemStatus ASC.
+--     This keeps the record with the lowest (best) status code per unique
+--     customer-crossref-address combination. The assumption is that lower
+--     BuylistItemStatus = more active/preferred record.
+--     ACTION REQUIRED: confirm with analyst what BuylistItemStatus values
+--     mean (e.g. 1=active, 2=pending, 9=inactive) and whether ASC ordering
+--     correctly prioritizes active records.
+
+-- FLAG 4 — COMPANY FILTER IS HARDCODED TO 'SA':
+--     The SQL WHERE clause filters to Company = 'SA' only. If VMI customers
+--     exist under other company codes they will be excluded entirely.
+--     ACTION REQUIRED: confirm whether all VMI BuyList entries are under
+--     company code 'SA' or whether other codes (e.g. 'SI', 'AU') need
+--     to be included.
+--     PYTHON BUILD NOTE: parameterize the company code filter so it
+--     can be extended without editing SQL strings.
+
+-- FLAG 5 — STATEFERENCENUMBER IS THE DISTRIBUTOR SKU:
+--     StateReferenceNumber is the field that maps to Customer Item Reference
+--     from the distributor files. Despite the name suggesting a state code,
+--     this field contains the distributor-facing product identifier.
+--     This naming is potentially confusing — document clearly in the
+--     Python pipeline that this is the distributor SKU crosswalk field.
+
+-- FLAG 6 — CSRF32 AND ITS ROLE:
+--     CustomerCrossReference (renamed CSRF32) is also pulled back by the
+--     OOIT query via its Oracle Buylist join. CSRF32 appears in both VMIBL
+--     and OOIT, suggesting it is the shared reference used to link
+--     in-transit orders back to BuyList entries. This may be the
+--     missing link explaining how OOIT connects to the inventory data.
+--     ACTION REQUIRED: confirm with analyst whether CSRF32 is the
+--     intended join key between OOIT and the inventory pipeline.
+
+================================================================================
+RAW M CODE
+================================================================================
+
+let
+    Source = Sql.Database("y2tjz7qjmziezabg56725hmy54-sll2odfgmm6ene2p55ripmzeaq.datawarehouse.fabric.microsoft.com", "ERP", [Query="WITH RankedData AS (#(lf)    SELECT#(lf)        Company,#(lf)        BuyListCode,#(lf)        ItemCode,#(lf)        StateReferenceNumber,#(lf)        BuylistItemStatus,#(lf)        CustomerCrossReference,#(lf)        Customer,#(lf)        CustomerDeliveryAddressCode,#(lf)        CustomerFullName,#(lf)        BuyListDetailKey,#(lf)        ROW_NUMBER() OVER (#(lf)            PARTITION BY #(lf)                CustomerCrossReference,#(lf)                Customer,#(lf)                CustomerDeliveryAddressCode#(lf)            ORDER BY BuylistItemStatus ASC#(lf)        ) AS rn#(lf)    FROM dbo.vw_BuyList_DetailInfo#(lf)    WHERE#(lf)        Company = 'SA'#(lf)       #(lf))#(lf)#(lf)SELECT *#(lf)FROM RankedData#(lf)WHERE rn = 1#(lf)ORDER BY BuylistItemStatus ASC"]),
+    #"Inserted Merged Column" = Table.AddColumn(Source, "Customer #", each Text.Combine({[Customer], [CustomerDeliveryAddressCode]}, " "), type text),
+    #"Inserted Merged Column1" = Table.AddColumn(#"Inserted Merged Column", "Key3", each Text.Combine({[#"Customer #"], [StateReferenceNumber]}, ""), type text),
+    #"Removed Duplicates" = Table.Distinct(#"Inserted Merged Column1", {"Key3"}),
+    #"Renamed Columns" = Table.RenameColumns(#"Removed Duplicates",{{"ItemCode", "CATN32"}, {"Customer #", "BLCD32"}, {"CustomerCrossReference", "CSRF32"}})
+in
+    #"Renamed Columns"
+
+================================================================================
+END OF FILE
+================================================================================
