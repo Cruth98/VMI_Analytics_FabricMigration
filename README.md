@@ -254,7 +254,7 @@ Key findings from the audit:
 
 ### Current State Query Documentation (`CurrentStateQueryDocs/`)
 
-Three critical queries reverse-engineered and documented with full M code, 
+Three examples of critical queries reverse-engineered and documented with full M code, 
 transformation logic, column mapping, flags, and Python build notes:
 
 **`VMIBL_SQL_mcode.txt`** — The SKU crosswalk. Most critical query in the 
