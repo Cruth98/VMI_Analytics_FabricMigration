@@ -1,195 +1,171 @@
 -- =============================================================================
--- CREATE VIEW scut.vw_Orders_Base
+-- CREATE VIEW scut.vw_BuyList_DetailInfo
 -- VMI Analytics Lakehouse — scut schema
 -- =============================================================================
 --
 -- PURPOSE:
---     Live shortcut view replicating dbo.vw_Orders_Base from the ERP Fabric
---     Data Warehouse. References scut schema shortcut tables — always reflects
---     current ERP data at query time, no snapshot or copy.
+--     Live shortcut view replicating dbo.vw_BuyList_DetailInfo from the ERP
+--     Fabric Data Warehouse. References scut schema shortcut tables — always
+--     reflects current ERP data at query time, no snapshot or copy.
 --
 -- SOURCE VIEW DEFINITION:
 --     Obtained via sys.sql_modules from ERP endpoint, May 2026.
---     Original view created by [REDACTED].
+--     Original view created by Jeremy Simpson (jsimpson@sazerac.com).
+--     BuyListDetailKey added by Jeremy to link to Orders_Base.
 --
 -- BASE TABLES (all in scut schema as Fabric shortcuts):
---     scut.OracleSCMDistributedOrderOrchestrationLineExtract       L
---     scut.OracleSCMDistributedOrderOrchestrationHeaderExtract     H
---     scut.OracleSCMDistributedOrderOrchestrationFulfillLineExtract   (CTE)
---     scut.OracleSCMDistributedOrderOrchestrationOrderAddressExtract  O
---     scut.OracleCommonPartySite                                   OCPS
---     scut.OracleCommonCustomerAccount                             A
---     scut.OracleCommonPartyExtract                                C
---     scut.OracleCommonItemExtract                                 I
---     scut.OracleSCMCommonInvOrgParametersExtract                  N
---     scut.OracleCommonOrganizationUnit                            COU
---     scut.OracleCustomSalesOrdersFullFillLineEFF                  X
---     scut.OracleCustomSubInventoryDetails                         d
+--     scut.Buylist_Item       bi   — BuyList item records (535K rows)
+--     scut.Buylist_Header     bh   — BuyList header records (2,123 rows)
+--     scut.ItemMaster         im   — Item master (112K rows)
+--     scut.Buylist_Customer   bc   — BuyList customer relationships (3,948 rows)
+--     scut.CustomerMaster     cm   — Customer master (37K rows)
 --
--- KEY DESIGN NOTES:
---     - LatestFulfillLine CTE deduplicates fulfill lines using ROW_NUMBER()
---       partitioned by source order + line number, ordered by last update
---       date descending. Keeps only the most recent fulfill line per order
---       line. This is what makes vw_Orders_Base safe for quantity aggregation.
---     - Draft and reference orders excluded via HeaderStatusCode filter.
---     - DeliveryAddressCode extracted from PARTYSITENUMBER via SUBSTRING/
---       CHARINDEX logic — middle segment of hyphen-delimited party site number.
---     - OrdersBaseKey is the computed join key to vw_BuyList_DetailInfo:
---       SKU + CustomerNumber + Company + DeliveryAddressCode + OrganizationCode
---     - Commented-out WHERE clause retained from source — do not uncomment
---       here; apply open-orders filter in consuming notebooks/queries.
+-- JOIN STRUCTURE:
+--     Buylist_Item INNER JOIN Buylist_Header ON BUYLISTKEY
+--     Buylist_Item LEFT JOIN ItemMaster ON ITEMKEY = ItemKey
+--     Buylist_Item LEFT JOIN Buylist_Customer ON BUYLISTKEY
+--     Buylist_Customer LEFT JOIN CustomerMaster ON CUSTOMERKEY = CustomerKey
 --
--- CRITICAL USAGE NOTE:
---     Always filter WHERE SKU != 'PALLETSLIPCHG' for any inventory or
---     quantity-based analysis. Charge lines appear alongside product lines
---     and return NULL for Company, Plant, Stockroom and OrganizationCode.
+-- ROW COUNT NOTE:
+--     Row count (~942K) exceeds Buylist_Item (535K) because Buylist_Customer
+--     fans out one row per customer per BuyList. One BuyList with multiple
+--     delivery customers produces multiple rows per item.
+--
+-- COLUMN SCOPE:
+--     This view includes the VMI-relevant column subset identified by the
+--     VMI & Inventory Planning team. The full ERP view has 193 columns.
+--     Audit/modified-by columns and surrogate keys are intentionally excluded.
+--     Two columns added beyond the original team selection:
+--         BuylistItemComplianceStatus — state compliance approval status
+--         ItemType                    — Finished Goods / Raw Material etc.
 --
 -- HOW TO RUN:
---     1. Open VMI_Analytics_Lakehouse SQL analytics endpoint in Fabric
+--     1. Open the VMI_Analytics_Lakehouse SQL analytics endpoint in Fabric
 --     2. Open a new query
 --     3. Run this entire script
 --     4. View will appear under scut schema in the object explorer
 --
 -- HOW TO QUERY:
---     SQL:   SELECT * FROM scut.vw_Orders_Base
---     Spark: df = spark.table("scut.vw_Orders_Base")
+--     SQL:   SELECT * FROM scut.vw_BuyList_DetailInfo
+--     Spark: df = spark.table("scut.vw_BuyList_DetailInfo")
 --
 -- =============================================================================
 
-CREATE VIEW scut.vw_Orders_Base AS
-
-WITH LatestFulfillLine AS (
-    SELECT *
-    FROM (
-        SELECT *,
-            ROW_NUMBER() OVER (
-                PARTITION BY FULFILLLINESOURCEORDERNUMBER,
-                             FULFILLLINESOURCELINENUMBER
-                ORDER BY FULFILLLINELASTUPDATEDATE DESC
-            ) AS LFL
-        FROM scut.OracleSCMDistributedOrderOrchestrationFulfillLineExtract
-    ) AS F
-    WHERE LFL = 1
-)
+CREATE VIEW scut.vw_BuyList_DetailInfo AS
 
 SELECT
-    H.HEADERCUSTOMERPONUMBER                                AS PONumber,
-    H.HEADERORDERNUMBER                                     AS OrderNumber,
 
-    CASE
-        WHEN L.LINESOURCEORDERSYSTEM = 'SYS21'
-        THEN L.LINESOURCELINENUMBER
-        ELSE L.LINEDISPLAYLINENUMBER
-    END                                                     AS LineNumber,
+    -- -------------------------------------------------------------------------
+    -- BUYLIST ITEM  (source: scut.Buylist_Item bi)
+    -- -------------------------------------------------------------------------
+    bi.COMPANY_CODE                     AS Company,
+    bi.BUYING_LIST_CODE                 AS BuyListCode,
+    bi.ITEM_CODE                        AS ItemCode,
+    bi.STATE_ITEM_REFERENCE_NUMBER      AS StateReferenceNumber,
+    -- NOTE: StateReferenceNumber is the distributor-facing SKU / product
+    -- identifier despite the name suggesting a state code. This is the
+    -- field used for the SKU crosswalk join in the VMI pipeline.
+    -- Do NOT confuse with CustomerCrossReference — they are separate fields.
+    bi.CUSTOMER_CROSS_REFERENCE         AS CustomerCrossReference,
+    bi.COMMERCIAL_BU                    AS CommercialBu,
+    bi.NABCA_STATE_ITEM_NUMBER          AS NABCA_ItemNumber,
+    bi.[STATUS]                         AS BuylistItemStatus,
+    bi.ORDER_TYPE                       AS BuylistItemOrderType,
+    bi.SHIP_POINT1                      AS ShipPoint1,
+    bi.[START_DATE]                     AS BuylistItemStartDate,
+    bi.END_DATE                         AS BuylistItemEndDate,
+    bi.REGISTRATION_KEY                 AS RegistrationKey,
+    bi.COMPLIANCE_STATUS                AS BuylistItemComplianceStatus,
 
-    H.HEADERORDEREDDATE                                     AS OrderDate,
-    CAST(H.HEADERCREATIONDATE AS DATE)                      AS HeaderCreateDate,
-    H.HEADERONHOLD                                          AS HeaderOnHold,
-    L.LINEONHOLD                                            AS LineOnHold,
-    CAST(L.LINECREATIONDATE AS DATE)                        AS LineCreateDate,
-    L.LINESCHEDULESHIPDATE                                  AS RequestedShipDate,
-    L.LINEACTUALSHIPDATE                                    AS ShipDate,
-    H.HEADERSTATUSCODE                                      AS OrderStatus,
-    L.LINESTATUSCODE                                        AS LineStatusCode,
-    H.HEADERORDERTYPECODE                                   AS HeaderTypeCode,
-    L.LINEORDEREDQTY                                        AS OrderQty,
-    F.FULFILLLINESHIPPEDQTY                                 AS FulfillLineShippedQTY,
+    -- -------------------------------------------------------------------------
+    -- BUYLIST HEADER  (source: scut.Buylist_Header bh)
+    -- -------------------------------------------------------------------------
+    bh.BUYING_LIST_DESCRIPTION          AS BuyingListDescription,
+    bh.[STATE]                          AS [State],
+    bh.FROM_DATE                        AS BuylistHeaderFromDate,
+    bh.TO_DATE                          AS BuylistToDate,
+    bh.[STATUS]                         AS BuyListHeaderStatus,
 
-    -- Item identifiers
-    L.LINEINVENTORYITEMID                                   AS SKUID,
-    I.ITEMBASEPEOITEMNUMBER                                 AS SKU,
-    I.ITEMTRANSLATIONPEODESCRIPTION                         AS SKUDesc,
-    L.LINEORDEREDUOM                                        AS LineUOM,
+    -- -------------------------------------------------------------------------
+    -- ITEM MASTER  (source: scut.ItemMaster im)
+    -- -------------------------------------------------------------------------
+    im.TransitionSKU,
+    im.SKUDescription,
+    im.ItemType,
+    im.BottleSize,
+    im.BottleSizeinML,
+    im.StandardSizeDescription,
+    im.SizeCode,
+    im.SizeCodeDescription,
+    im.BrandDescription,
+    im.BrandOwnership,
+    im.SubBrandDescription,
+    im.PriceTierDescription,
+    im.PackageType,
+    im.PackageTypeDescription,
+    im.StatusFlag                       AS ItemMasterStatusFlag,
+    im.StatusFlagDescription            AS ItemMasterStatusFlagDescription,
+    im.CoPackInd,
+    im.ItemGroupMinorDescription,
+    im.SCCCode,
+    im.UPCCode,
+    im.FullCost,
+    im.Litreage_9L,
+    im.[Subdivision/SupplierDescription],
+    im.ABAItemType,
+    im.WeightperStandardUnit,
+    im.StandardCaseSize,
+    im.BottlesPerCase,
 
-    -- Organisation / plant
-    SUBSTRING(N.ATTRIBUTE1, 1, 2)                           AS Company,
-    SUBSTRING(N.ATTRIBUTE1, 3, 2)                           AS Plant,
-    SUBSTRING(d.ATTRIBUTE1, 3, 2)                           AS Stockroom,
-    N.ORGANIZATIONCODE                                      AS OrganizationCode,
-    COU.ORGANIZATIONUNITTRANSLATIONPEONAME                  AS OrganizationName,
-    F.FULFILLLINESUBINVENTORY                               AS LineSubInventory,
+    -- -------------------------------------------------------------------------
+    -- BUYLIST CUSTOMER  (source: scut.Buylist_Customer bc)
+    -- -------------------------------------------------------------------------
+    bc.[STATUS]                         AS BuylistCustomerStatus,
+    bc.CUSTOMER                         AS Customer,
+    bc.DELIVERY_ADDRESS_CODE            AS CustomerDeliveryAddressCode,
 
-    -- Customer identifiers
-    H.HEADERSOLDTOPARTYID                                   AS CustomerID,
-    A.ACCOUNTNUMBER                                         AS CustomerNumber,
+    -- -------------------------------------------------------------------------
+    -- CUSTOMER MASTER  (source: scut.CustomerMaster cm)
+    -- -------------------------------------------------------------------------
+    cm.CustomerFullName,
+    cm.CustomerName,
+    cm.CustomerStatus,
+    cm.VMIIndicator,
+    cm.SubChannel,
+    cm.DepletionCode,
+    cm.DeliveryType,
+    cm.InvoiceAddressCode,
+    cm.BuyingListCode,
+    cm.LeadTimeInDays,
+    cm.DepletionCustomerNumber,
+    cm.DepletionDelCode,
 
-    -- DeliveryAddressCode — middle segment of hyphen-delimited party site number
-    SUBSTRING(
-        OCPS.PARTYSITENUMBER,
-        CHARINDEX('-', OCPS.PARTYSITENUMBER) + 1,
-        CHARINDEX('-', OCPS.PARTYSITENUMBER,
-            CHARINDEX('-', OCPS.PARTYSITENUMBER) + 1)
-        - CHARINDEX('-', OCPS.PARTYSITENUMBER) - 1
-    )                                                       AS DeliveryAddressCode,
-
-    C.PARTYNAME                                             AS CustomerName,
-    A.ACCOUNTNUMBER                                         AS AccountNumber,
-    A.ACCOUNTNAME                                           AS AccountName,
-
-    -- Computed join key — links to scut.vw_BuyList_DetailInfo on BuyListDetailKey
-    -- Format: SKU + CustomerNumber + Company + DeliveryAddressCode + OrganizationCode
+    -- -------------------------------------------------------------------------
+    -- COMPUTED  (matches ERP view definition exactly)
+    -- -------------------------------------------------------------------------
     CONCAT(
-        I.ITEMBASEPEOITEMNUMBER,
-        A.ACCOUNTNUMBER,
-        SUBSTRING(N.ATTRIBUTE1, 1, 2),
-        SUBSTRING(
-            OCPS.PARTYSITENUMBER,
-            CHARINDEX('-', OCPS.PARTYSITENUMBER) + 1,
-            CHARINDEX('-', OCPS.PARTYSITENUMBER,
-                CHARINDEX('-', OCPS.PARTYSITENUMBER) + 1)
-            - CHARINDEX('-', OCPS.PARTYSITENUMBER) - 1
-        ),
-        N.ORGANIZATIONCODE
-    )                                                       AS OrdersBaseKey
+        bi.ITEM_CODE,
+        bc.CUSTOMER,
+        bi.COMPANY_CODE,
+        bc.DELIVERY_ADDRESS_CODE,
+        bi.SHIP_POINT1
+    )                                   AS BuyListDetailKey
+    -- BuyListDetailKey joins to vw_Orders_Base on the same computed key.
+    -- Format: ItemCode + Customer + Company + DeliveryAddressCode + ShipPoint1
 
-FROM scut.OracleSCMDistributedOrderOrchestrationLineExtract AS L
+FROM scut.Buylist_Item bi
 
-INNER JOIN scut.OracleSCMDistributedOrderOrchestrationHeaderExtract AS H
-    ON  L.LINEHEADERID = H.HEADERID
-    AND H.HEADERSTATUSCODE NOT IN ('DOO_DRAFT', 'DOO_REFERENCE')
-    AND H.HEADERSOURCEDOCUMENTTYPECODE IS NULL
+INNER JOIN scut.Buylist_Header bh
+    ON bi.BUYLISTKEY = bh.BUYLISTKEY
 
-LEFT JOIN scut.OracleSCMDistributedOrderOrchestrationOrderAddressExtract AS O
-    ON  H.HEADERID = O.ORDERADDRESSHEADERID
-    AND O.ORDERADDRESSUSETYPE = 'SHIP_TO'
+LEFT JOIN scut.ItemMaster im
+    ON bi.ITEMKEY = im.ItemKey
 
-LEFT JOIN scut.OracleCommonPartySite AS OCPS
-    ON  O.ORDERADDRESSPARTYSITEID = OCPS.PARTYSITEID
+LEFT JOIN scut.Buylist_Customer bc
+    ON bi.BUYLISTKEY = bc.BUYLISTKEY
 
-LEFT JOIN scut.OracleCommonCustomerAccount AS A
-    ON  H.HEADERSOLDTOPARTYID = A.PARTYID
-
-LEFT JOIN scut.OracleCommonPartyExtract AS C
-    ON  H.HEADERSOLDTOPARTYID = C.PARTYID
-
-LEFT JOIN scut.OracleCommonItemExtract AS I
-    ON  L.LINEINVENTORYITEMID = I.ITEMBASEPEOINVENTORYITEMID
-    AND L.LINEINVENTORYORGANIZATIONID = I.ITEMBASEPEOINVENTORYORGANIZATIONID
-    AND I.ITEMTRANSLATIONPEOLANGUAGE = 'US'
-
-LEFT JOIN LatestFulfillLine AS F
-    ON  L.LINEID = F.FULFILLLINELINEID
-    AND L.LINEHEADERID = F.FULFILLLINEHEADERID
-    AND L.LINEINVENTORYORGANIZATIONID = F.FULFILLLINEINVENTORYORGANIZATIONID
-
-LEFT JOIN scut.OracleSCMCommonInvOrgParametersExtract AS N
-    ON  F.FULFILLLINEFULFILLORGID = N.ORGANIZATIONID
-
-LEFT JOIN scut.OracleCommonOrganizationUnit AS COU
-    ON  F.FULFILLLINEFULFILLORGID = COU.ORGANIZATIONID
-
-LEFT OUTER JOIN scut.OracleCustomSalesOrdersFullFillLineEFF AS X
-    ON  F.FULFILLLINEID = X.FULFILL_LINE_ID
-    AND X.CONTEXT_CODE = 'Allocation Details'
-
-LEFT OUTER JOIN scut.OracleCustomSubInventoryDetails AS d
-    ON  F.FULFILLLINEFULFILLORGID = d.ORGANIZATION_ID
-    AND X.ATTRIBUTE_CHAR1 = d.SECONDARY_INVENTORY_NAME
-
--- WHERE L.LINEACTUALSHIPDATE IS NULL
--- Commented out intentionally — full order lifecycle preserved.
--- Apply open-orders filter in consuming notebooks:
---     WHERE ShipDate IS NULL AND SKU != 'PALLETSLIPCHG'
+LEFT JOIN scut.CustomerMaster cm
+    ON bc.CUSTOMERKEY = cm.CustomerKey
 
 -- =============================================================================
 -- END OF FILE
