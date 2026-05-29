@@ -28,6 +28,8 @@ of the project. Each folder is self-contained with its own artifacts.
 ```
 VMI_Analytics_FabricMigration/
 │
+├── Epic1_EstablishingPlatformStandards.pdf  ← Governance framework & architecture decisions
+│
 ├── FabricCode/                         ← Lakehouse pipeline code and SQL views
 │   ├── Create_BuyListDetail_View.sql   — Live ERP shortcut view (946K rows validated)
 │   ├── Create_OrdersBase_View.sql      — Live ERP orders view (2.6M rows validated)
@@ -57,6 +59,7 @@ VMI_Analytics_FabricMigration/
 ```
 
 **Where to start:**
+- New to the platform architecture? → Read `Epic1_EstablishingPlatformStandards.pdf`, before reviewing any code 
 - New to the project? → Read this README, then open `ERP_Documentation/ERP_DataArchitecture_TechnicalDocumentation.pdf`
 - Reviewing the pipeline code? → Start with `FabricCode/nbook_template_source.ipynb`, then `vmi_utils.py`
 - Reviewing the Atlas audit? → Open `AtlasUpload/AtlasCurrentStateDataLineage.csv`, then the `CurrentStateQueryDocs/` files
