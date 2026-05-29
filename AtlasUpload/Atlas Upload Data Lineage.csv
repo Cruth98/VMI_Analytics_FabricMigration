@@ -112,7 +112,7 @@ Atlas VMI_Open Upload File -- CombinedSGWS_Nest,SGWS-VMI 852-4501-METR,,,L:\VMI 
 375 List,vw_BuyList_DetailInfo,,,Oracle Probably? ,,,,,,,Done,Not needed
 375 List,[Table2],Probably not even needed,,Unsure,,,,,,,Done,Not needed
 Atlas Software Export,Atlas Software Export,,,,,,,,,,None,
-OOS Info,Not currently functional,Request from boss to layer in OOS information to the final Atlas upload,,,,,,,,"Per Brian's research with team, biggest reason we have Out of stockk exclusions sounds like we already have inventory.  Let's get the OOS flags routed back through the Atlas upload data to pull these out ahead of time",None,
+OOS Info,Not currently functional,Request from boss to layer in OOS information to the final Atlas upload,,,,,,,,"Per Brian's research with team, biggest reason we have Out of stockk exclusions sounds like we already have inventory. Â Let's get the OOS flags routed back through the Atlas upload data to pull these out ahead of time",None,
 Final Frcst,Atlas Forecast,,,L:\VMI Operations\Forecast & Replenishment\Replenishment and Forecast by Customer\Atlas Uploads\Atlas Forecast.csv,,,,,,,Done,
 ,,,,,,,,,,,,
 ,,,,,,,,,,,,
