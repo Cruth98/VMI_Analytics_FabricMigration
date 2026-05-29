@@ -10,7 +10,7 @@
 --
 -- SOURCE VIEW DEFINITION:
 --     Obtained via sys.sql_modules from ERP endpoint, May 2026.
---     Original view created by Jeremy Simpson (jsimpson@sazerac.com).
+--     Original view created by [REDACTED].
 --
 -- BASE TABLES (all in scut schema as Fabric shortcuts):
 --     scut.OracleSCMDistributedOrderOrchestrationLineExtract       L
