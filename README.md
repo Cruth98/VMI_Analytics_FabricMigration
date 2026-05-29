@@ -13,14 +13,60 @@ structured logging, and live Oracle ERP shortcut views.
 **Validated by:** Director of Master Data and Performance Reporting within 30 days 
 of project initiation.
 
-**AI-augmented development**: This project demonstrates applied use of generative AI (Claude/ChatGPT) as a productivity multiplier across SQL development, Python pipeline construction, architecture documentation, and debugging workflows — accelerating delivery without sacrificing engineering rigor or exposing confidentiality..
+**AI-augmented development:** This project demonstrates applied use of generative 
+AI (Claude) as a productivity multiplier across SQL development, Python pipeline 
+construction, architecture documentation, and debugging workflows — accelerating 
+delivery without sacrificing engineering rigor.
+
+---
+
+## Repository Structure & Navigation
+
+This repository is organized into three sections reflecting the three workstreams 
+of the project. Each folder is self-contained with its own artifacts.
+
+```
+VMI_Analytics_FabricMigration/
+│
+├── FabricCode/                         ← Lakehouse pipeline code and SQL views
+│   ├── Create_BuyListDetail_View.sql   — Live ERP shortcut view (946K rows validated)
+│   ├── Create_OrdersBase_View.sql      — Live ERP orders view (2.6M rows validated)
+│   ├── nbook_template_source.ipynb     — Standardized raw→stg ingestion template
+│   ├── nbook_stg_cust_inventory_       — First validated production source notebook
+│   │   johnson_brothers.ipynb
+│   └── vmi_utils.py                    — Shared utility library (all notebooks)
+│
+├── ERP_Documentation/                  ← Oracle ERP architecture reference
+│   ├── ERP_DataArchitecture_           — Full technical reference (13 objects,
+│   │   TechnicalDocumentation.pdf        schema, join keys, row counts)
+│   └── ERDs/                           — Source lineage diagrams (6 views, 300 DPI)
+│       ├── 01_vw_BuyList_DetailInfo.png
+│       ├── 02_vw_BuyList_DetailInfo_MDM.png
+│       ├── 03_vw_SKUTransition_BuyList.png
+│       ├── 04_vw_SKUTransition_Item.png
+│       ├── 05_vw_SKUTransition_ManualAdditon.png
+│       └── 06_vw_SKUTransition_OpenOrders.png
+│
+└── AtlasUpload/                        ← Current-state Atlas process audit
+    ├── AtlasCurrentStateDataLineage.csv — Full 114-query source inventory
+    └── CurrentStateQueryDocs/          — Reverse-engineered M code documentation
+        ├── VMIBL_SQL_mcode.txt         — SKU crosswalk query (core of pipeline)
+        ├── OnOrderInTransitData_SQL_   — In-transit SQL query documentation
+        │   mcode.txt
+        └── RNDC_GA_NM_mcode.txt        — Distributor source query documentation
+```
+
+**Where to start:**
+- New to the project? → Read this README, then open `ERP_Documentation/ERP_DataArchitecture_TechnicalDocumentation.pdf`
+- Reviewing the pipeline code? → Start with `FabricCode/nbook_template_source.ipynb`, then `vmi_utils.py`
+- Reviewing the Atlas audit? → Open `AtlasUpload/AtlasCurrentStateDataLineage.csv`, then the `CurrentStateQueryDocs/` files
 
 ---
 
 ## Business Problem
 
 The VMI team delivers a 5-column inventory file to Atlas planning software every 
-business day by 4:00 PM. The process spanning the entire operation:
+business day by 4:00 PM. The existing process:
 
 - 7+ Excel workbooks, 90+ Power Query transformations, manual XLOOKUP formulas
 - Legacy ODBC connections tied to a single analyst's machine — un-runnable by 
@@ -73,185 +119,70 @@ Source Systems / Files / ERP SQL Endpoints
   `spark.table("scut.vw_BuyList_DetailInfo")` immediately signals a live external 
   source vs. a governed Lakehouse table.
 - **No business logic in shared utility functions** — Atlas-specific filters 
-  (ORTP32 exclusions, ITMS35 status codes) belong in process-specific notebooks, 
-  not in shared utils. Centralise only after multiple processes share the same logic.
-- **cust_in_transit as a separate domain** — in-transit data from source files and 
-  from SQL OOIT lives in its own domain, joined to `core.cust_inventory` in the 
-  core layer. Separating domains allows all sources to consolidate cleanly 
-  regardless of origin.
+  belong in process-specific notebooks, not in shared utils. Centralise only 
+  after multiple processes share the same logic.
+- **cust_in_transit as a separate domain** — in-transit data from source files 
+  and from SQL OOIT lives in its own domain, joined to `core.cust_inventory` in 
+  the core layer.
 - **Delete before upload for file drops** — Fabric Lakehouse overwrite does not 
-  reliably update modified timestamps, breaking freshness validation. Standard 
-  practice: always delete existing file before uploading the new version.
+  reliably update modified timestamps, breaking freshness validation.
 
 ---
 
-## ERP Integration — scut Schema
+## FabricCode — What's In Here
 
-### Shortcut Views Built and Validated
+### SQL Views (`Create_BuyListDetail_View.sql`, `Create_OrdersBase_View.sql`)
 
-Two live shortcut views were built in the `scut` schema, replicating core ERP 
-views against Oracle data via Fabric shortcuts. Row counts validated against 
-ERP source exactly.
+Two live shortcut views built in the `scut` schema, replicating core ERP views 
+against Oracle data via Fabric shortcuts. Row counts validated against ERP source 
+exactly.
 
 | View | Row Count | Purpose |
 |------|-----------|---------|
-| `scut.vw_BuyList_DetailInfo` | 946,539 | Denormalized BuyList detail — SKU crosswalk, customer, item, compliance |
-| `scut.vw_Orders_Base` | 2,632,879 | Oracle ERP open orders with fulfill-line deduplication |
+| `scut.vw_BuyList_DetailInfo` | 946,539 | Denormalized BuyList — SKU crosswalk, customer, item, compliance |
+| `scut.vw_Orders_Base` | 2,632,879 | Oracle ERP orders with fulfill-line deduplication CTE |
 
-### vw_BuyList_DetailInfo
+**Key architectural finding documented in the SQL:** Fabric shortcuts cannot point 
+to SQL views — only storage objects. Some ERP tables are themselves shortcuts and 
+cannot be re-shortcutted. Identifying this constraint prevented a significant 
+downstream pipeline failure. The correct pattern: shortcut to native base tables 
+→ create view in Lakehouse SQL analytics endpoint using `scut.` table references.
 
-Replicates `dbo.vw_BuyList_DetailInfo` from the ERP Fabric Data Warehouse. 
-Five base tables joined via scut schema shortcuts:
-
-- `scut.Buylist_Item` — 535K BuyList item records
-- `scut.Buylist_Header` — 2,123 BuyList header records
-- `scut.ItemMaster` — 112K item records (97K Informatica MDM, 10K SYS21)
-- `scut.Buylist_Customer` — 3,948 customer-BuyList relationships (source of row fan-out)
-- `scut.CustomerMaster` — 37K customer records
-
-**Computed join key:**
-```sql
-BuyListDetailKey = CONCAT(ItemCode, Customer, Company, DeliveryAddressCode, ShipPoint1)
-```
-
-### vw_Orders_Base
-
-Replicates `dbo.vw_Orders_Base` with a `LatestFulfillLine` CTE that deduplicates 
-fulfill lines using `ROW_NUMBER()` partitioned by source order + line number — 
-making the view safe for quantity aggregation (unlike `vw_Orders`, which produces 
-duplicates on raw LEFT JOIN).
-
-- 12 base tables joined across Oracle SCM extract objects
-- Draft and reference orders excluded via `HeaderStatusCode` filter
-- `DeliveryAddressCode` extracted from `PARTYSITENUMBER` via `SUBSTRING`/
-  `CHARINDEX` logic — middle segment of hyphen-delimited party site number
-- **Critical usage note:** always filter `WHERE SKU != 'PALLETSLIPCHG'` for 
-  quantity-based analysis
-
-**Computed join key:**
-```sql
-OrdersBaseKey = CONCAT(SKU, CustomerNumber, Company, DeliveryAddressCode, OrganizationCode)
-```
-
-**Join to BuyList:**
+**Cross-view join key:**
 ```sql
 scut.vw_BuyList_DetailInfo.BuyListDetailKey = scut.vw_Orders_Base.OrdersBaseKey
 ```
 
-### Fabric Shortcut Limitation Identified
+### Source Notebook Template (`nbook_template_source.ipynb`)
 
-Discovered a non-obvious Fabric architectural constraint: shortcuts cannot point 
-to SQL views — only to storage objects. Some ERP tables are themselves shortcuts 
-(to SYS21, Atlas) and cannot be re-shortcutted. This finding prevented a 
-significant downstream pipeline failure. Correct pattern established: shortcut 
-to native base tables → create view in Lakehouse SQL analytics endpoint using 
-`scut.` table references.
-
----
-
-## ERP Data Architecture Documentation
-
-Complete reference documentation produced for the Oracle ERP data layer, 
-replacing tribal knowledge with a queryable, AI-accessible architecture reference.
-
-### Source Lineage Diagrams (6 views, 300 DPI)
-
-| Diagram | View | Rows |
-|---------|------|------|
-| 01_vw_BuyList_DetailInfo | BuyList detail — primary operational view | 942K |
-| 02_vw_BuyList_DetailInfo_MDM | BuyList MDM source — preferred for strict active record alignment | 665K |
-| 03_vw_SKUTransition_BuyList | Gap analysis — BuyLists missing transition SKU | 19,838 |
-| 04_vw_SKUTransition_Item | Item-level transition identification | 251 |
-| 05_vw_SKUTransition_ManualAdditon | Manual brand manager transitions (EffectiveDate ≥ 2025) | 11 |
-| 06_vw_SKUTransition_OpenOrders | Comprehensive order + transition view (SYS21 + Oracle) | 52,520 |
-
-**Color coding:** Purple = External source system · Orange = Integration/staging · 
-Blue = Core fact table · Green parallelogram = View · Teal = Supporting view
-
-### Schema Documented — 13 Core Objects
-
-Complete column-level documentation, row counts, grain definitions, and confirmed 
-join keys for:
-
-- Buylist_Item, Buylist_Header, Buylist_Customer, ItemMaster, CustomerMaster
-- SAZ_BUYLIST_TO_ITEM_STAGING_TBL, SAZ_BUYLIST_HEADER_STAGING_TBL
-- S21_InventoryBalance, SYS21_InventoryBalance, SYS21_OpenOrders
-- PIMPlanningDetails, tbl_demand_master, tbl_supply_master
-
-### Key Data Quality Discovery
-
-Identified that the team's primary BuyList view (`vw_BuyList_DetailInfo`) was 
-returning 72,416 fewer rows than the MDM source — confirmed via systematic SQL 
-comparison. Root cause: different customer join behavior (fan-out) between the 
-ETL-backed view and the MDM-direct view, plus 785 records the ETL carries as 
-active that MDM has soft-deleted. Previously undetected.
-
----
-
-## Atlas Upload — Source Lineage Audit
-
-Full reverse-engineering of the existing Atlas upload process across 114 source 
-queries and files — the investigation that surfaced the need for the Fabric migration.
-
-### Scale of Existing Process
-
-- **101 unique source queries** across 7+ Excel workbooks
-- **3 machine-specific ODBC connections** blocking unattended pipeline execution
-- **~40,000 rows dropped daily** due to unresolved SKU crosswalk mismatches 
-  with no logging or visibility
-- **10 of 114 sources** already accessible via Fabric at time of audit
-
-### Key Findings from M Code Audit
-
-| Source | Finding |
-|--------|---------|
-| SGWS (12 locations) | Maps `MaxOrderQty` → "On Hand Loaded" — Atlas receiving max reorder quantities as inventory figures daily across highest-volume distributor |
-| RNDC GA/NM | Commented out of Append1 — GA and NM inventory silently excluded from Atlas upload |
-| Breakthru 852 | File structure changed since 2022 — NETTABLE column now present, original M code fails |
-| Virginia Bailment | In-transit file has no 2026 data — every shipped order returns blank status, zero in-transit cases |
-| West Virginia Bailment | No status filter — all orders regardless of status treated as in-transit |
-| LDF | References Column6 that doesn't exist — throws error on every run |
-| VMIBL (SKU crosswalk) | ROW_NUMBER() deduplication logic and Company = 'SA' hardcode identified for parameterization |
-| On Order In Transit | Triple deduplication, orphaned SIRF32 column, connection to final upload unconfirmed |
-
-### VMIBL — The Core SKU Crosswalk
-
-The `VMIBL` query is the most critical component in the pipeline — every 
-distributor SKU must match via `Key3` to produce a valid `CATN32`. Unmatched 
-SKUs produce null `CATN32` and are silently dropped. This is the primary driver 
-of the ~40K daily row exclusions.
+Standardized, config-driven notebook template for ingesting all 90+ sources. 
+Analysts update one configuration block — no logic changes required elsewhere.
 
 ```
-Key3 = Customer + ' ' + CustomerDeliveryAddressCode + StateReferenceNumber
-Key2 = Dpl Customer (key) + Customer Item Reference
-Join: Key2 (Append1) = Key3 (VMIBL) → returns CATN32
-```
-
----
-
-## Python Pipeline — Source Notebook Template
-
-A standardized, config-driven notebook template for ingesting all 90+ sources 
-into the Lakehouse. Analysts fill a single configuration block — no business 
-logic changes required across the remaining notebook sections.
-
-### Pipeline Stages (per source notebook)
-
-```
-Section 2  → Configuration block (only section requiring source-specific changes)
-Section 4  → Extract source (freshness validation before read)
-Section 5  → Validate raw (column structure, row count, nulls)
+Section 2  → Configuration (only section requiring source-specific changes)
+Section 4  → Extract source + freshness validation
+Section 5  → Validate raw (columns, row count, nulls)
 Section 6  → Write raw_ Delta table (partitioned by load_date)
 Section 7  → Transform & standardize (rename → cast → null handling → dedupe)
 Section 8  → Validate staged (business key uniqueness, post-transform nulls)
 Section 9  → Write stg_ Delta table
-Section 10 → Log run status (log.pipeline_runs)
-Section 11 → Exception handling (failure logging — every run produces a log entry)
+Section 10 → Log run to log.pipeline_runs
+Section 11 → Exception handling (every run produces a log entry)
 ```
 
-### vmi_utils.py — Shared Utility Library
+### First Production Source (`nbook_stg_cust_inventory_johnson_brothers.ipynb`)
 
-Single shared utility file imported by every notebook. Key functions:
+Template instantiated for Johnson Brothers — validated and running daily in production.
+
+| Date | Status | Raw Rows | Stg Rows |
+|------|--------|----------|----------|
+| 2026-05-18 | SUCCESS | 4,451 | 4,448 |
+| 2026-05-15 | SUCCESS | 4,448 | 4,445 |
+
+### Shared Utility Library (`vmi_utils.py`)
+
+Single file imported by every notebook. Updates here propagate automatically 
+to all notebooks on next run.
 
 | Function | Purpose |
 |----------|---------|
@@ -265,75 +196,76 @@ Single shared utility file imported by every notebook. Key functions:
 | `get_sanitized_column_names()` | Returns sanitized column names for config population |
 | `log_message()` | Timestamped notebook output logging (INFO/WARN/ERROR) |
 
-### First Source Onboarded — Johnson Brothers (Validated)
+---
 
-```python
-COLUMN_RENAMES = {
-    "location"            : "location",
-    "item"                : "item",
-    "maxorderqty"         : "max_order_qty",
-    "onhand_qty"          : "on_hand_qty",
-    "total_in_transit_qty": "in_transit_qty"
-}
-```
+## ERP_Documentation — What's In Here
 
-Pipeline run log (validated, running daily in production):
+### Technical Documentation PDF
 
-| Date | Status | Raw Rows | Stg Rows |
-|------|--------|----------|----------|
-| 2026-05-18 | SUCCESS | 4,451 | 4,448 |
-| 2026-05-15 | SUCCESS | 4,448 | 4,445 |
+Complete Oracle ERP data architecture reference — 13 core objects documented 
+with column-level schema, row counts, grain definitions, and confirmed join keys. 
+Produced to replace tribal knowledge with a queryable, AI-accessible reference.
+
+Objects documented: Buylist_Item, Buylist_Header, Buylist_Customer, ItemMaster, 
+CustomerMaster, SAZ_BUYLIST_TO_ITEM_STAGING_TBL, SAZ_BUYLIST_HEADER_STAGING_TBL, 
+S21_InventoryBalance, SYS21_InventoryBalance, SYS21_OpenOrders, PIMPlanningDetails, 
+tbl_demand_master, tbl_supply_master.
+
+### ERDs — Source Lineage Diagrams
+
+Six 300 DPI lineage diagrams tracing each ERP view from consumption layer back 
+through all source systems. Color coded by layer:
+
+| File | View | Rows |
+|------|------|------|
+| 01_vw_BuyList_DetailInfo | Primary BuyList operational view | 942K |
+| 02_vw_BuyList_DetailInfo_MDM | MDM-direct view — preferred for strict active record alignment | 665K |
+| 03_vw_SKUTransition_BuyList | Gap analysis — BuyLists missing transition SKU | 19,838 |
+| 04_vw_SKUTransition_Item | Item-level transition identification | 251 |
+| 05_vw_SKUTransition_ManualAdditon | Manual brand manager transitions (EffectiveDate ≥ 2025) | 11 |
+| 06_vw_SKUTransition_OpenOrders | Comprehensive order + transition view (SYS21 + Oracle) | 52,520 |
+
+**Color coding:** Purple = External source · Orange = Integration/staging · 
+Blue = Core fact table · Green parallelogram = View · Teal = Supporting view
+
+**Key data quality discovery documented here:** The team's primary BuyList view 
+was returning 72,416 fewer rows than the MDM source — confirmed via systematic 
+SQL comparison and elevated to the Director of Master Data. Previously undetected.
 
 ---
 
-## Domain Standards — cust_inventory
+## AtlasUpload — What's In Here
 
-All stg notebooks in the `cust_inventory` domain rename source columns to 
-these standard targets, enabling the core notebook to union all sources cleanly:
+### Data Lineage CSV (`AtlasCurrentStateDataLineage.csv`)
 
-| Column | Represents | Required |
-|--------|-----------|---------|
-| `location` | Distributor location or warehouse code | Yes |
-| `item` | Distributor-facing item / SKU code | Yes |
-| `on_hand_qty` | On-hand inventory quantity | Yes |
-| `in_transit_qty` | In-transit quantity | If available |
-| `max_order_qty` | Maximum order quantity | If available |
+Full inventory of the existing Atlas upload process — 114 queries across 7+ 
+Excel workbooks audited and documented. Columns include source file path, 
+refresh frequency, delivery method, Fabric migration status, M code audit 
+status, and remediation notes.
 
-### Core Layer Join Logic
+Key findings from the audit:
+- 101 unique source queries identified
+- 3 machine-specific ODBC connections blocking unattended execution
+- ~40,000 rows dropped daily with no logging or visibility
+- 10 of 114 sources already accessible via Fabric at time of audit
 
-```python
-# stg → BuyList crosswalk
-stg.item + stg.location → scut.vw_BuyList_DetailInfo
-ON stg.item = StateReferenceNumber
-AND stg.location = CONCAT(Customer, ' ', CustomerDeliveryAddressCode)
-→ resolves CATN32 (ItemCode on BuyList)
-```
+### Current State Query Documentation (`CurrentStateQueryDocs/`)
 
----
+Three critical queries reverse-engineered and documented with full M code, 
+transformation logic, column mapping, flags, and Python build notes:
 
-## Repository Contents
+**`VMIBL_SQL_mcode.txt`** — The SKU crosswalk. Most critical query in the 
+pipeline — every distributor SKU must match here to produce a valid CATN32. 
+Unmatched SKUs are silently dropped, making this the primary driver of the 
+~40K daily row exclusions.
 
-```
-VMI_Analytics_Fabric_Migration/
-├── sql/
-│   ├── Create_vw_BuyList_DetailInfo.sql     # scut schema view — 946K rows validated
-│   └── Create_vw_Orders_Base.sql            # scut schema view — 2.6M rows validated
-├── notebooks/
-│   ├── nbook_template_source.ipynb          # Standardized raw→stg template
-│   └── nbook_stg_cust_inventory_johnson_brothers.ipynb  # First validated source
-├── utils/
-│   └── vmi_utils.py                         # Shared utility library
-├── docs/
-│   ├── ERP_Data_Architecture_Technical_Documentation.pdf
-│   ├── 01_vw_BuyList_DetailInfo.png         # Source lineage diagram
-│   ├── 02_vw_BuyList_DetailInfo_MDM.png
-│   ├── 03_vw_SKUTransition_BuyList.png
-│   ├── 04_vw_SKUTransition_Item.png
-│   ├── 05_vw_SKUTransition_ManualAdditon.png
-│   └── 06_vw_SKUTransition_OpenOrders.png
-└── lineage/
-    └── Atlas_Upload_Data_Lineage.csv        # Full 114-query source audit
-```
+**`OnOrderInTransitData_SQL_mcode.txt`** — Oracle ERP in-transit query pulling 
+orders within a 3-day window. Documents triple deduplication pattern, orphaned 
+columns, and unconfirmed connection to final upload output.
+
+**`RNDC_GA_NM_mcode.txt`** — Distributor source covering GA and NM markets. 
+Documents that this query is currently commented out of the master append — 
+meaning GA and NM inventory has been silently excluded from the Atlas upload.
 
 ---
 
